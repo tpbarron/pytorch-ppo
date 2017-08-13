@@ -29,7 +29,7 @@ PI = torch.DoubleTensor([3.1415926])
 parser = argparse.ArgumentParser(description='PyTorch actor-critic example')
 parser.add_argument('--gamma', type=float, default=0.995, metavar='G',
                     help='discount factor (default: 0.995)')
-parser.add_argument('--env_name', default="Reacher-v1", metavar='G',
+parser.add_argument('--env-name', default="Reacher-v1", metavar='G',
                     help='name of the environment to run')
 parser.add_argument('--tau', type=float, default=0.97, metavar='G',
                     help='gae (default: 0.97)')
@@ -41,7 +41,7 @@ parser.add_argument('--tau', type=float, default=0.97, metavar='G',
 #                     help='damping (default: 1e-1)')
 parser.add_argument('--seed', type=int, default=543, metavar='N',
                     help='random seed (default: 1)')
-parser.add_argument('--batch_size', type=int, default=5000, metavar='N',
+parser.add_argument('--batch-size', type=int, default=5000, metavar='N',
                     help='batch size (default: 5000)')
 parser.add_argument('--render', action='store_true',
                     help='render the environment')
