@@ -94,7 +94,7 @@ def update_params_actor_critic(batch):
     masks = torch.Tensor(batch.mask)
     actions = torch.Tensor(np.concatenate(batch.action, 0))
     states = torch.Tensor(batch.state)
-    values = value_net(Variable(states))
+    action_means, action_log_stds, action_stds, values = ac_net(Variable(states))
 
     returns = torch.Tensor(actions.size(0),1)
     deltas = torch.Tensor(actions.size(0),1)
@@ -120,11 +120,10 @@ def update_params_actor_critic(batch):
     # pol_entpen = (-args.entropy_coeff) * meanent
 
     action_var = Variable(actions)
-
-    action_means, action_log_stds, action_stds, values_ = ac_net(Variable(states))
+    # compute probs from actions above
     log_prob_cur = normal_log_density(action_var, action_means, action_log_stds, action_stds)
 
-    action_means_old, action_log_stds_old, action_stds_old, values_old_ = ac_net(Variable(states), old=True)
+    action_means_old, action_log_stds_old, action_stds_old, values_old = ac_net(Variable(states), old=True)
     log_prob_old = normal_log_density(action_var, action_means_old, action_log_stds_old, action_stds_old)
 
     # backup params after computing probs but before updating new params
@@ -139,8 +138,8 @@ def update_params_actor_critic(batch):
     surr2 = torch.clamp(ratio, 1.0 - args.clip_epsilon, 1.0 + args.clip_epsilon) * advantages_var[:,0]
     policy_surr = -torch.min(surr1, surr2).mean()
 
-    vf_loss1 = (values_ - targets).pow(2.)
-    vpredclipped = values_old_ + torch.clamp(values_ - values_old_, -args.clip_epsilon, args.clip_epsilon)
+    vf_loss1 = (values - targets).pow(2.)
+    vpredclipped = values_old + torch.clamp(values - values_old, -args.clip_epsilon, args.clip_epsilon)
     vf_loss2 = (vpredclipped - targets).pow(2.)
     vf_loss = 0.5 * torch.max(vf_loss1, vf_loss2).mean()
 
@@ -172,12 +171,10 @@ def update_params(batch):
         prev_value = values.data[i, 0]
         prev_advantage = advantages[i, 0]
 
-    values_ = value_net(Variable(states))
     targets = Variable(returns)
 
     opt_value.zero_grad()
-    value_loss = (values_ - targets).pow(2.).mean()
-    print ("Value loss: ", value_loss.data[0] / targets.size()[0])
+    value_loss = (values - targets).pow(2.).mean()
     value_loss.backward()
     opt_value.step()
 
