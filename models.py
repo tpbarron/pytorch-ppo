@@ -14,7 +14,6 @@ def weights_init(m):
     classname = m.__class__.__name__
     if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d):
     # if classname.find('Conv') != -1 or classname.find('Linear') != -1:
-        print (classname)
         if m.weight is not None:
             nn.init.orthogonal(m.weight.data)
         if m.bias is not None:
