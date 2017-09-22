@@ -6,8 +6,6 @@ from itertools import count
 
 import gym
 import numpy as np
-import scipy.optimize
-from gym import wrappers
 
 import torch
 import torch.autograd as autograd
@@ -16,33 +14,26 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torchvision.transforms as T
 from torch.autograd import Variable
+from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 
-from models import Policy, Value, ActorCritic
-from replay_memory import Memory
+from storage import RolloutStorage
+from models import DiscretePolicy, Value, DiscreteActorCritic, DiscreteConvActorCritic, ActorCritic #Policy, Value, ActorCritic
 from running_state import ZFilter
+import envs
 
-# from utils import *
+PI = torch.FloatTensor([3.1415926])
 
-torch.set_default_tensor_type('torch.DoubleTensor')
-PI = torch.DoubleTensor([3.1415926])
-
-parser = argparse.ArgumentParser(description='PyTorch actor-critic example')
+parser = argparse.ArgumentParser(description='PyTorch Proximal Policy Optimization')
 parser.add_argument('--gamma', type=float, default=0.995, metavar='G',
                     help='discount factor (default: 0.995)')
-parser.add_argument('--env-name', default="Reacher-v1", metavar='G',
+parser.add_argument('--env-name', default="CartPole-v1", metavar='G',
                     help='name of the environment to run')
 parser.add_argument('--tau', type=float, default=0.97, metavar='G',
                     help='gae (default: 0.97)')
-# parser.add_argument('--l2_reg', type=float, default=1e-3, metavar='G',
-#                     help='l2 regularization regression (default: 1e-3)')
-# parser.add_argument('--max_kl', type=float, default=1e-2, metavar='G',
-#                     help='max kl value (default: 1e-2)')
-# parser.add_argument('--damping', type=float, default=1e-1, metavar='G',
-#                     help='damping (default: 1e-1)')
 parser.add_argument('--seed', type=int, default=543, metavar='N',
                     help='random seed (default: 1)')
-parser.add_argument('--batch-size', type=int, default=5000, metavar='N',
-                    help='batch size (default: 5000)')
+parser.add_argument('--sample-batch-size', type=int, default=20, metavar='N',
+                    help='batch size (default: 20)')
 parser.add_argument('--render', action='store_true',
                     help='render the environment')
 parser.add_argument('--log-interval', type=int, default=1, metavar='N',
@@ -53,209 +44,162 @@ parser.add_argument('--clip-epsilon', type=float, default=0.2, metavar='N',
                     help='Clipping for PPO grad')
 parser.add_argument('--use-joint-pol-val', action='store_true',
                     help='whether to use combined policy and value nets')
+parser.add_argument('--continuous-actions', action='store_true',
+                    help='Use continuous actions')
+parser.add_argument('--epochs-per-batch', type=int, default=1,
+                    help='number of passes though the sampled data')
+parser.add_argument('--max-episode-steps', type=int, default=1000,
+                    help='Maximum number of steps in an episode')
 args = parser.parse_args()
 
+# env = envs.make_env(args.env_name, args.seed, ".")
 env = gym.make(args.env_name)
-
 num_inputs = env.observation_space.shape[0]
-num_actions = env.action_space.shape[0]
+if args.continuous_actions:
+    num_actions = env.action_space.shape[0]
+else:
+    num_actions = env.action_space.n
 
 env.seed(args.seed)
 torch.manual_seed(args.seed)
 
 if args.use_joint_pol_val:
-    ac_net = ActorCritic(num_inputs, num_actions)
-    opt_ac = optim.Adam(ac_net.parameters(), lr=0.001)
+    if args.continuous_actions:
+        ac_net = ActorCritic(num_inputs, num_actions)
+    else:
+        ac_net = DiscreteActorCritic(num_inputs, env.action_space.n)
+    opt_ac = optim.Adam(ac_net.parameters(), lr=0.01)
 else:
-    policy_net = Policy(num_inputs, num_actions)
+    policy_net = DiscretePolicy(num_inputs, num_actions)
+    policy_net_old = DiscretePolicy(num_inputs, num_actions)
+    policy_net_old.load_state_dict(policy_net.state_dict())
     value_net = Value(num_inputs)
+    value_net_old = Value(num_inputs)
+    value_net_old.load_state_dict(value_net.state_dict())
     opt_policy = optim.Adam(policy_net.parameters(), lr=0.001)
     opt_value = optim.Adam(value_net.parameters(), lr=0.001)
 
-def select_action(state):
-    state = torch.from_numpy(state).unsqueeze(0)
-    action_mean, _, action_std = policy_net(Variable(state))
-    action = torch.normal(action_mean, action_std)
-    return action
+# def normal_log_density(x, mean, log_std, std):
+#     var = std.pow(2)
+#     log_density = -(x - mean).pow(2) / (2 * var) - 0.5 * torch.log(2 * Variable(PI)) - log_std
+#     return log_density.sum(1)
 
-def select_action_actor_critic(state):
-    state = torch.from_numpy(state).unsqueeze(0)
-    action_mean, _, action_std, v = ac_net(Variable(state))
-    action = torch.normal(action_mean, action_std)
-    return action
-
-def normal_log_density(x, mean, log_std, std):
-    var = std.pow(2)
-    log_density = -(x - mean).pow(2) / (2 * var) - 0.5 * torch.log(2 * Variable(PI)) - log_std
-    return log_density.sum(1)
-
-def update_params_actor_critic(batch):
-    rewards = torch.Tensor(batch.reward)
-    masks = torch.Tensor(batch.mask)
-    actions = torch.Tensor(np.concatenate(batch.action, 0))
-    states = torch.Tensor(batch.state)
-    action_means, action_log_stds, action_stds, values = ac_net(Variable(states))
-
-    returns = torch.Tensor(actions.size(0),1)
-    deltas = torch.Tensor(actions.size(0),1)
-    advantages = torch.Tensor(actions.size(0),1)
-
-    prev_return = 0
-    prev_value = 0
-    prev_advantage = 0
-    for i in reversed(range(rewards.size(0))):
-        returns[i] = rewards[i] + args.gamma * prev_return * masks[i]
-        deltas[i] = rewards[i] + args.gamma * prev_value * masks[i] - values.data[i]
-        advantages[i] = deltas[i] + args.gamma * args.tau * prev_advantage * masks[i]
-        prev_return = returns[i, 0]
-        prev_value = values.data[i, 0]
-        prev_advantage = advantages[i, 0]
-
-    targets = Variable(returns)
-
-    # kloldnew = policy_net.kl_old_new() # oldpi.pd.kl(pi.pd)
-    # ent = policy_net.entropy() #pi.pd.entropy()
-    # meankl = torch.reduce_mean(kloldnew)
-    # meanent = torch.reduce_mean(ent)
-    # pol_entpen = (-args.entropy_coeff) * meanent
-
-    action_var = Variable(actions)
-    # compute probs from actions above
-    log_prob_cur = normal_log_density(action_var, action_means, action_log_stds, action_stds)
-
-    action_means_old, action_log_stds_old, action_stds_old, values_old = ac_net(Variable(states), old=True)
-    log_prob_old = normal_log_density(action_var, action_means_old, action_log_stds_old, action_stds_old)
-
-    # backup params after computing probs but before updating new params
-    ac_net.backup()
-
+def ppo_update():
+    advantages = rollouts.returns[:-1] - rollouts.value_preds[:-1]
     advantages = (advantages - advantages.mean()) / advantages.std()
-    advantages_var = Variable(advantages)
+    for _ in range(args.epochs_per_batch):
+        sampler = BatchSampler(SubsetRandomSampler(range(args.sample_batch_size)), args.sample_batch_size, drop_last=False)
+        for indices in sampler:
+            # print ("Ind: ", indices)
+            indices = torch.LongTensor(indices)
+            states_batch = rollouts.states[:-1][indices] #view(-1, *rollouts.states.size()[-1:])#[indices]
+            # print ("States: ", states_batch)
+            actions_batch = rollouts.actions.view(-1, 1)[indices]
+            return_batch = rollouts.returns[:-1].view(-1, 1)[indices]
 
-    opt_ac.zero_grad()
-    ratio = torch.exp(log_prob_cur - log_prob_old) # pnew / pold
-    surr1 = ratio * advantages_var[:,0]
-    surr2 = torch.clamp(ratio, 1.0 - args.clip_epsilon, 1.0 + args.clip_epsilon) * advantages_var[:,0]
-    policy_surr = -torch.min(surr1, surr2).mean()
+            # print ("states: ", states_batch, actions_batch, return_batch)
 
-    vf_loss1 = (values - targets).pow(2.)
-    vpredclipped = values_old + torch.clamp(values - values_old, -args.clip_epsilon, args.clip_epsilon)
-    vf_loss2 = (vpredclipped - targets).pow(2.)
-    vf_loss = 0.5 * torch.max(vf_loss1, vf_loss2).mean()
+            # Reshape to do in a single forward pass for all steps
+            # if args.continuous_actions:
+            #     action_mean, action_log_std, action_std, value = ac_net(Variable(states_batch).unsqueeze(0))
+            #     # action = torch.normal(action_mean, action_std)
+            #     action_log_probs = normal_log_density(actions_batch, action_mean, action_log_std, action_std).data
+            #     # action = action.data
+            #     # values, logits = ac_net(Variable(states_batch).unsqueeze(0))
+            #     # log_probs = F.log_softmax(logits)
+            #     # action_log_probs = log_probs.gather(1, Variable(actions_batch))
+            # else:
+            values, logits = ac_net(Variable(states_batch))
+            log_probs = F.log_softmax(logits)
+            action_log_probs = log_probs.gather(1, Variable(actions_batch))
 
-    total_loss = policy_surr + vf_loss
-    total_loss.backward()
-    torch.nn.utils.clip_grad_norm(ac_net.parameters(), 40)
-    opt_ac.step()
+            old_log_probs_batch = rollouts.old_log_probs.view(-1, rollouts.old_log_probs.size(-1))[indices]
+            old_action_log_probs = old_log_probs_batch.gather(1, actions_batch)
 
+            ratio = torch.exp(action_log_probs - Variable(old_action_log_probs))
+            adv_targ = Variable(advantages.view(-1, 1)[indices])
+            surr1 = ratio * adv_targ
+            surr2 = ratio.clamp(1.0 - args.clip_epsilon, 1.0 + args.clip_epsilon) * adv_targ
+            action_loss = -torch.min(surr1, surr2).mean() # PPO's pessimistic surrogate (L^CLIP)
 
-def update_params(batch):
-    rewards = torch.Tensor(batch.reward)
-    masks = torch.Tensor(batch.mask)
-    actions = torch.Tensor(np.concatenate(batch.action, 0))
-    states = torch.Tensor(batch.state)
-    values = value_net(Variable(states))
+            log_probs = F.log_softmax(logits)
+            probs = F.softmax(logits)
 
-    returns = torch.Tensor(actions.size(0),1)
-    deltas = torch.Tensor(actions.size(0),1)
-    advantages = torch.Tensor(actions.size(0),1)
+            dist_entropy = -(log_probs * probs).sum(-1).mean()
 
-    prev_return = 0
-    prev_value = 0
-    prev_advantage = 0
-    for i in reversed(range(rewards.size(0))):
-        returns[i] = rewards[i] + args.gamma * prev_return * masks[i]
-        deltas[i] = rewards[i] + args.gamma * prev_value * masks[i] - values.data[i]
-        advantages[i] = deltas[i] + args.gamma * args.tau * prev_advantage * masks[i]
-        prev_return = returns[i, 0]
-        prev_value = values.data[i, 0]
-        prev_advantage = advantages[i, 0]
+            value_loss = (Variable(return_batch) - values).pow(2).mean()
 
-    targets = Variable(returns)
+            opt_ac.zero_grad()
+            (value_loss + action_loss - dist_entropy * args.entropy_coeff).backward()
+            opt_ac.step()
 
-    opt_value.zero_grad()
-    value_loss = (values - targets).pow(2.).mean()
-    value_loss.backward()
-    opt_value.step()
+# initial reset, will run continuously from now on
+obs = env.reset()
+print ("Obs: ", obs.shape)
+episode_reward = 0.
+episode_step = 0
+episode_num = 0
 
-    # kloldnew = policy_net.kl_old_new() # oldpi.pd.kl(pi.pd)
-    # ent = policy_net.entropy() #pi.pd.entropy()
-    # meankl = torch.reduce_mean(kloldnew)
-    # meanent = torch.reduce_mean(ent)
-    # pol_entpen = (-args.entropy_coeff) * meanent
+obs_shape = env.observation_space.shape
+action_shape = num_actions
+rollouts = RolloutStorage(args.sample_batch_size, obs_shape, action_shape)
+current_state = torch.zeros(*obs_shape)
+def update_current_state(state):
+    state = torch.from_numpy(state).float()
+    current_state = state
+    return current_state
 
-    action_var = Variable(actions)
+state = env.reset()
+current_state = update_current_state(state)
+rollouts.states[0].copy_(current_state)
+episode_reward = 0
 
-    action_means, action_log_stds, action_stds = policy_net(Variable(states))
-    log_prob_cur = normal_log_density(action_var, action_means, action_log_stds, action_stds)
+for i_update in count(1):
+    for step in range(args.sample_batch_size):
 
-    action_means_old, action_log_stds_old, action_stds_old = policy_net(Variable(states), old=True)
-    log_prob_old = normal_log_density(action_var, action_means_old, action_log_stds_old, action_stds_old)
+        # # Sample actions
+        # if args.continuous_actions:
+        #     state_var = Variable(rollouts.states[step], volatile=True).unsqueeze(0)
+        #     action_mean, action_log_std, action_std, value = ac_net(state_var)
+        #     action = torch.normal(action_mean, action_std)
+        #     log_probs = normal_log_density(action, action_mean, action_log_std, action_std).data
+        #     action = action.data
+        # else:
+        state_var = Variable(rollouts.states[step], volatile=True) #.unsqueeze(0)
+        value, logits = ac_net(state_var)
+        probs = F.softmax(logits)
+        log_probs = F.log_softmax(logits).data
+        action = probs.multinomial().data
 
-    # backup params after computing probs but before updating new params
-    policy_net.backup()
+        if args.render:
+            env.render()
 
-    advantages = (advantages - advantages.mean()) / advantages.std()
-    advantages_var = Variable(advantages)
+        # Obser reward and next state
+        state, reward, done, info = env.step(action.numpy()[0])
 
-    opt_policy.zero_grad()
-    ratio = torch.exp(log_prob_cur - log_prob_old) # pnew / pold
-    surr1 = ratio * advantages_var[:,0]
-    surr2 = torch.clamp(ratio, 1.0 - args.clip_epsilon, 1.0 + args.clip_epsilon) * advantages_var[:,0]
-    policy_surr = -torch.min(surr1, surr2).mean()
-    policy_surr.backward()
-    torch.nn.utils.clip_grad_norm(policy_net.parameters(), 40)
-    opt_policy.step()
+        # reward = torch.from_numpy(np.expand_dims(np.stack(reward), 1)).float()
+        episode_reward += reward
 
-running_state = ZFilter((num_inputs,), clip=5)
-running_reward = ZFilter((1,), demean=False, clip=10)
-episode_lengths = []
+        # If done then clean the history of observations.
+        masks = 0.0 if done else 1.0 #torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done])
+        # final_rewards *= masks
+        # final_rewards += (1 - masks) * episode_rewards
+        # episode_rewards *= masks
 
-for i_episode in count(1):
-    memory = Memory()
+        reward = torch.FloatTensor([reward])
+        masks = torch.FloatTensor([masks])
 
-    num_steps = 0
-    reward_batch = 0
-    num_episodes = 0
-    while num_steps < args.batch_size:
-        state = env.reset()
-        state = running_state(state)
+        if done:
+            state = env.reset()
+            print ("episode_reward = ", episode_reward)
+            episode_reward = 0
 
-        reward_sum = 0
-        for t in range(10000): # Don't infinite loop while learning
-            if args.use_joint_pol_val:
-                action = select_action_actor_critic(state)
-            else:
-                action = select_action(state)
-            action = action.data[0].numpy()
-            next_state, reward, done, _ = env.step(action)
-            reward_sum += reward
+        current_state = update_current_state(state)
+        # print ("Action: ", action.size())
+        rollouts.insert(step, current_state, action, value.data, log_probs, reward, masks)
 
-            next_state = running_state(next_state)
+    next_value = ac_net(Variable(rollouts.states[-1], volatile=True))[0].data
+    rollouts.compute_returns(next_value, True, args.gamma, args.tau)
+    ppo_update()
 
-            mask = 1
-            if done:
-                mask = 0
-
-            memory.push(state, np.array([action]), mask, next_state, reward)
-
-            if args.render:
-                env.render()
-            if done:
-                break
-
-            state = next_state
-        num_steps += (t-1)
-        num_episodes += 1
-        reward_batch += reward_sum
-
-    reward_batch /= num_episodes
-    batch = memory.sample()
-    if args.use_joint_pol_val:
-        update_params_actor_critic(batch)
-    else:
-        update_params(batch)
-
-    if i_episode % args.log_interval == 0:
-        print('Episode {}\tLast reward: {}\tAverage reward {:.2f}'.format(
-            i_episode, reward_sum, reward_batch))
+    rollouts.states[0].copy_(rollouts.states[-1])
