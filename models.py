@@ -20,10 +20,11 @@ def weights_init(m):
         if m.bias is not None:
             m.bias.data.fill_(0)
 
-class ActorCritic(nn.Module):
+
+class ContinuousActorCritic(nn.Module):
 
     def __init__(self, num_inputs, num_outputs, hidden=64):
-        super(ActorCritic, self).__init__()
+        super(ContinuousActorCritic, self).__init__()
         self.affine1 = nn.Linear(num_inputs, hidden)
         self.affine2 = nn.Linear(hidden, hidden)
 
@@ -38,9 +39,9 @@ class ActorCritic(nn.Module):
         x = F.tanh(self.affine1(x))
         x = F.tanh(self.affine2(x))
         action_mean = self.action_mean(x)
-        print ("action_mean: ", action_mean.size(), self.action_log_std.size())
+        # print ("action_mean: ", action_mean.size(), self.action_log_std.size())
         action_log_std = self.action_log_std.expand_as(action_mean)
-        print ("act log std:", action_log_std.size())
+        # print ("act log std:", action_log_std.size())
         action_std = torch.exp(action_log_std)
         value = self.value_head(x)
         return action_mean, action_log_std, action_std, value

@@ -3,13 +3,13 @@ import torch
 
 class RolloutStorage(object):
     def __init__(self, num_steps, obs_shape, action_shape):
-        self.states = torch.zeros(num_steps + 1, *obs_shape)
-        self.rewards = torch.zeros(num_steps, 1)
-        self.value_preds = torch.zeros(num_steps + 1, 1)
-        self.old_log_probs = torch.zeros(num_steps, action_shape)
-        self.returns = torch.zeros(num_steps + 1, 1)
-        self.actions = torch.LongTensor(num_steps, 1)
-        self.masks = torch.zeros(num_steps, 1)
+        self.states = torch.zeros(num_steps + 1, 1, *obs_shape)
+        self.rewards = torch.zeros(num_steps, 1, 1)
+        self.value_preds = torch.zeros(num_steps + 1, 1, 1)
+        self.old_log_probs = torch.zeros(num_steps, 1, action_shape)
+        self.returns = torch.zeros(num_steps + 1, 1, 1)
+        self.actions = torch.LongTensor(num_steps, 1, 1)
+        self.masks = torch.zeros(num_steps, 1, 1)
 
     def cuda(self):
         self.states = self.states.cuda()
