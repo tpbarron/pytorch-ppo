@@ -26,7 +26,7 @@ PI = torch.FloatTensor([3.1415926])
 parser = argparse.ArgumentParser(description='PyTorch Proximal Policy Optimization')
 parser.add_argument('--gamma', type=float, default=0.99, metavar='G',
                     help='discount factor (default: 0.99)')
-parser.add_argument('--env-name', default="CartPole-v1", metavar='G',
+parser.add_argument('--env-name', default="LunarLander-v2", metavar='G',
                     help='name of the environment to run')
 parser.add_argument('--tau', type=float, default=0.95, metavar='G',
                     help='gae (default: 0.97)')
