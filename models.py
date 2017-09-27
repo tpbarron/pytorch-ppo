@@ -29,19 +29,19 @@ class ContinuousActorCritic(nn.Module):
         self.affine2 = nn.Linear(hidden, hidden)
 
         self.action_mean = nn.Linear(hidden, num_outputs)
-        self.action_mean.weight.data.mul_(0.1)
+        self.action_mean.weight.data.mul_(0.01)
         self.action_mean.bias.data.mul_(0.0)
         self.action_log_std = nn.Parameter(torch.zeros(1, num_outputs))
 
         self.value_head = nn.Linear(hidden, 1)
 
+        # self.apply(weights_init)
+
     def forward(self, x):
         x = F.tanh(self.affine1(x))
         x = F.tanh(self.affine2(x))
         action_mean = self.action_mean(x)
-        # print ("action_mean: ", action_mean.size(), self.action_log_std.size())
         action_log_std = self.action_log_std.expand_as(action_mean)
-        # print ("act log std:", action_log_std.size())
         action_std = torch.exp(action_log_std)
         value = self.value_head(x)
         return action_mean, action_log_std, action_std, value
