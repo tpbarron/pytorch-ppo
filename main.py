@@ -24,11 +24,11 @@ import envs
 PI = torch.FloatTensor([3.1415926])
 
 parser = argparse.ArgumentParser(description='PyTorch Proximal Policy Optimization')
-parser.add_argument('--gamma', type=float, default=0.995, metavar='G',
-                    help='discount factor (default: 0.995)')
+parser.add_argument('--gamma', type=float, default=0.99, metavar='G',
+                    help='discount factor (default: 0.99)')
 parser.add_argument('--env-name', default="CartPole-v1", metavar='G',
                     help='name of the environment to run')
-parser.add_argument('--tau', type=float, default=0.97, metavar='G',
+parser.add_argument('--tau', type=float, default=0.95, metavar='G',
                     help='gae (default: 0.97)')
 parser.add_argument('--seed', type=int, default=543, metavar='N',
                     help='random seed (default: 1)')
@@ -38,7 +38,7 @@ parser.add_argument('--render', action='store_true',
                     help='render the environment')
 parser.add_argument('--log-interval', type=int, default=1, metavar='N',
                     help='interval between training status logs (default: 10)')
-parser.add_argument('--entropy-coeff', type=float, default=0.0, metavar='N',
+parser.add_argument('--entropy-coeff', type=float, default=0.01, metavar='N',
                     help='coefficient for entropy cost')
 parser.add_argument('--clip-epsilon', type=float, default=0.2, metavar='N',
                     help='Clipping for PPO grad')
@@ -50,8 +50,8 @@ parser.add_argument('--max-episode-steps', type=int, default=1000,
                     help='Maximum number of steps in an episode')
 args = parser.parse_args()
 
-env = envs.make_env(args.env_name, args.seed, ".")
-# env = gym.make(args.env_name)
+# env = envs.make_env(args.env_name, args.seed, ".")
+env = gym.make(args.env_name)
 num_inputs = env.observation_space.shape[0]
 num_actions = env.action_space.n
 
@@ -59,11 +59,11 @@ env.seed(args.seed)
 torch.manual_seed(args.seed)
 
 if args.use_joint_pol_val:
-    # ac_net = DiscreteActorCritic(num_inputs, env.action_space.n)
-    # opt_ac = optim.Adam(ac_net.parameters(), lr=0.01)
+    ac_net = DiscreteActorCritic(num_inputs, env.action_space.n)
+    opt_ac = optim.Adam(ac_net.parameters(), lr=0.001)
 
-    ac_net = DiscreteConvActorCritic(num_inputs, env.action_space)
-    opt_ac = optim.Adam(ac_net.parameters(), lr=0.001) #7e-4)
+    # ac_net = DiscreteConvActorCritic(num_inputs, env.action_space)
+    # opt_ac = optim.Adam(ac_net.parameters(), lr=0.001) #7e-4)
 else:
     policy_net = DiscretePolicy(num_inputs, num_actions)
     value_net = Value(num_inputs)
@@ -74,11 +74,12 @@ def ppo_update():
     advantages = rollouts.returns[:-1] - rollouts.value_preds[:-1]
     advantages = (advantages - advantages.mean()) / advantages.std()
     for _ in range(args.epochs_per_batch):
-        sampler = BatchSampler(SubsetRandomSampler(range(args.sample_batch_size)), args.sample_batch_size, drop_last=False)
+        sampler = BatchSampler(SubsetRandomSampler(range(args.sample_batch_size)), args.sample_batch_size/10, drop_last=False)
         for indices in sampler:
             # NOTE: depending on version of pytorch, this may need to be a LongTensor
             # indices = torch.LongTensor(indices)
-            states_batch = rollouts.states[:-1][indices].view(-1, *rollouts.states.size()[-3:])
+            # print (rollouts.states.size())
+            states_batch = rollouts.states[:-1][indices].view(-1, rollouts.states.size()[-1]) #*rollouts.states.size()[-3:])
             #view(-1, *rollouts.states.size()[-1:])#[indices]
             # print ("States: ", states_batch)
             actions_batch = rollouts.actions.view(-1, 1)[indices]
@@ -108,6 +109,16 @@ def ppo_update():
             (value_loss + action_loss - dist_entropy * args.entropy_coeff).backward()
             opt_ac.step()
 
+
+from visdom import Visdom
+vis = Visdom()
+
+# reward first point to append to
+win = vis.line(
+    X=np.array([0]),
+    Y=np.array([0]),
+)
+
 # initial reset, will run continuously from now on
 obs = env.reset()
 print ("Obs: ", obs.shape)
@@ -128,6 +139,7 @@ state = env.reset()
 current_state = update_current_state(state)
 rollouts.states[0].copy_(current_state)
 episode_reward = 0
+episode = 0
 
 for i_update in count(1):
     for step in range(args.sample_batch_size):
@@ -151,12 +163,19 @@ for i_update in count(1):
         reward = torch.FloatTensor([reward])
 
         # If done then clean the history of observations.
-        masks = torch.FloatTensor([0.0]) if done else torch.FloatTensor([1.0])
+        masks = torch.FloatTensor([[0.0]]) if done else torch.FloatTensor([[1.0]])
 
         if done:
+            episode += 1
             state = env.reset()
             print ("episode_reward = ", episode_reward)
-            torch.save(ac_net.state_dict(), 'snapshots/ac_net_ep'+str(i_update)+'rew'+str(episode_reward)+'.pth')
+            # torch.save(ac_net.state_dict(), 'snapshots/ac_net_ep'+str(i_update)+'rew'+str(episode_reward)+'.pth')
+            vis.line(
+                X=np.array([episode]),
+                Y=np.array([episode_reward]),
+                win=win,
+                update='append'
+            )
             episode_reward = 0
 
         current_state = update_current_state(state)
