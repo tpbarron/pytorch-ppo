@@ -28,7 +28,7 @@ parser.add_argument('--gamma', type=float, default=0.995, metavar='G',
                     help='discount factor (default: 0.995)')
 parser.add_argument('--env-name', default="LunarLanderContinuous-v2", metavar='G',
                     help='name of the environment to run')
-parser.add_argument('--tau', type=float, default=0.97, metavar='G',
+parser.add_argument('--tau', type=float, default=0.95, metavar='G',
                     help='gae (default: 0.97)')
 parser.add_argument('--seed', type=int, default=543, metavar='N',
                     help='random seed (default: 1)')
@@ -38,7 +38,7 @@ parser.add_argument('--render', action='store_true',
                     help='render the environment')
 parser.add_argument('--log-interval', type=int, default=25, metavar='N',
                     help='interval between training status logs (default: 10)')
-parser.add_argument('--entropy-coeff', type=float, default=0.0001, metavar='N',
+parser.add_argument('--entropy-coeff', type=float, default=0.01, metavar='N',
                     help='coefficient for entropy cost')
 parser.add_argument('--clip-epsilon', type=float, default=0.1, metavar='N',
                     help='Clipping for PPO grad')
@@ -70,8 +70,14 @@ if args.use_joint_pol_val:
 
 def normal_log_density(x, mean, log_std, std):
     var = std.pow(2)
-    log_density = -(x - mean).pow(2) / (2 * var) - 0.5 * torch.log(2 * Variable(PI)) - log_std
+    log_density = -(x - mean).pow(2) / (2 * var) - 0.5 * (torch.log(2 * Variable(PI) * std))
     return log_density.sum(1)
+
+# def normal_pdf(x, mean, std):
+#     return 1. / (torch.sqrt(2. * Variable(PI) * std.pow(2.))) * torch.exp(-(x - mean).pow(2) / (2 * std.pow(2.)))
+#
+# def log_normal_pdf(x, mean, std):
+#     return torch.log(normal_pdf(x, mean, std))
 
 def ppo_update():
     advantages = rollouts.returns[:-1] - rollouts.value_preds[:-1]
@@ -85,6 +91,7 @@ def ppo_update():
             return_batch = rollouts.returns[:-1].view(-1, 1)[indices]
 
             action_mean, action_log_std, action_std, values = ac_net(Variable(states_batch))
+            # action_log_probs = log_normal_pdf(Variable(actions_batch).float(), action_mean, action_std)
             action_log_probs = normal_log_density(Variable(actions_batch).float(), action_mean, action_log_std, action_std)
 
             old_action_mean = rollouts.old_action_means.view(-1, rollouts.old_action_means.size(-1))[indices]
@@ -94,6 +101,8 @@ def ppo_update():
                                                       Variable(old_action_mean, volatile=True),
                                                       Variable(old_action_log_std, volatile=True),
                                                       Variable(old_action_std, volatile=True)).data
+            # print ("old act log probs: ", old_action_log_probs.size())
+            # input("")
 
             ratio = torch.exp(action_log_probs - Variable(old_action_log_probs))
             adv_targ = Variable(advantages.view(-1, 1)[indices])
@@ -118,7 +127,6 @@ win = vis.line(
     Y=np.array([0]),
     opts=dict(title=args.env_name, xaxis={'title':'episode'}, yaxis={'title':'reward'})
 )
-
 
 # initial reset, will run continuously from now on
 obs = env.reset()
@@ -149,19 +157,23 @@ for i_update in count(1):
         state_var = Variable(rollouts.states[step], volatile=True)
         action_mean, action_log_std, action_std, value = ac_net(state_var)
         action = torch.normal(action_mean, action_std)
-        log_probs = normal_log_density(action, action_mean, action_log_std, action_std).data
+        # log_probs = normal_log_density(action, action_mean, action_log_std, action_std).data
         action = action.data
 
         action_np = action.numpy()[0]
         # print ("orig act: ", action_np)
         action_np = np.clip(action_np, env.action_space.low, env.action_space.high)
         # print ("Clipped act: ", action_np)
-        if args.render or episode % args.log_interval == 0:
-            env.render()
+        # if args.render or episode % args.log_interval == 0:
+        #     env.render()
 
         # Obser reward and next state
         state, reward, done, info = env.step(action_np)
-
+        if np.isnan(reward):
+            print ("ISNAN")
+            print (reward, action, action_np, done, action_mean, action_std, state_var)
+            input("")
+            reward = 0.0
         episode_reward += reward
         reward = torch.FloatTensor([reward])
 
