@@ -1,5 +1,7 @@
 # PyTorch implementation of PPO
 
+NOTE: This is not maintained. I recommend using the implementation [here](https://github.com/ikostrikov/pytorch-a2c-ppo-acktr). It is much more full featured and tested.
+
 This is a PyTorch implementation of [Proximal Policy Optimization](https://arxiv.org/abs/1707.06347).
 
 This is code mostly ported from the [OpenAI baselines implementation](https://github.com/openai/baselines) but currently does not optimize each batch for several epochs. I will add this soon.
